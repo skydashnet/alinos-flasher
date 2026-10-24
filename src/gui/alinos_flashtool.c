@@ -29,7 +29,7 @@
 #include <stdarg.h>
 #include <ctype.h>
 
-#define APP_VERSION  "2.0.0"
+#define APP_VERSION  "2.0.1"
 #define GITHUB_REPO  "skydashnet/alinos-flasher"
 
 enum {
@@ -558,6 +558,14 @@ static int broadcast_file(const char *path) {
     struct sockaddr_in dst1 = dst; dst1.sin_port = htons((u_short)g_cfg.port);
     struct sockaddr_in dst_beacon = dst; dst_beacon.sin_port = htons(6877);
 
+    /* Multicast Group 224.0.0.99 (Standar resmi TOOLS FLASHER / U-Boot Huawei) */
+    struct sockaddr_in dst_mcast = dst;
+    dst_mcast.sin_addr.s_addr = inet_addr("224.0.0.99");
+    dst_mcast.sin_port = htons((u_short)g_cfg.port);
+    struct sockaddr_in dst_mcast_918 = dst;
+    dst_mcast_918.sin_addr.s_addr = inet_addr("224.0.0.99");
+    dst_mcast_918.sin_port = htons(918);
+
     /* Subnet direct broadcast (menyesuaikan IP adapter yang dipilih) */
     struct sockaddr_in dst_sub = dst;
     char sub_bcast[64] = "255.255.255.255";
@@ -612,10 +620,12 @@ static int broadcast_file(const char *path) {
 
         DWORD now = GetTickCount();
         if (now - last_ctl >= 1000 || last_ctl == 0) {
+            sendto(s1, (char *)ctl, 244, 0, (struct sockaddr *)&dst_mcast, sizeof(dst_mcast));
             sendto(s1, (char *)ctl, 244, 0, (struct sockaddr *)&dst1, sizeof(dst1));
             sendto(s1, (char *)ctl, 244, 0, (struct sockaddr *)&dst_sub, sizeof(dst_sub));
             sendto(s1, (char *)ctl, 244, 0, (struct sockaddr *)&dst_beacon, sizeof(dst_beacon));
             if (g_cfg.use918) {
+                sendto(s1, (char *)ctl, 244, 0, (struct sockaddr *)&dst_mcast_918, sizeof(dst_mcast_918));
                 sendto(s1, (char *)ctl, 244, 0, (struct sockaddr *)&dst_918, sizeof(dst_918));
                 sendto(s1, (char *)ctl, 244, 0, (struct sockaddr *)&dst_918_sub, sizeof(dst_918_sub));
             }
@@ -641,9 +651,11 @@ static int broadcast_file(const char *path) {
         *(unsigned long *)(pkt + 16) = 0UL;
         memcpy(pkt + 20, data + off, clen);
 
+        sendto(s1, (char *)pkt, (int)(20 + clen), 0, (struct sockaddr *)&dst_mcast, sizeof(dst_mcast));
         sendto(s1, (char *)pkt, (int)(20 + clen), 0, (struct sockaddr *)&dst1, sizeof(dst1));
         sendto(s1, (char *)pkt, (int)(20 + clen), 0, (struct sockaddr *)&dst_sub, sizeof(dst_sub));
         if (g_cfg.use918) {
+            sendto(s1, (char *)pkt, (int)(20 + clen), 0, (struct sockaddr *)&dst_mcast_918, sizeof(dst_mcast_918));
             sendto(s1, (char *)pkt, (int)(20 + clen), 0, (struct sockaddr *)&dst_918, sizeof(dst_918));
             sendto(s1, (char *)pkt, (int)(20 + clen), 0, (struct sockaddr *)&dst_918_sub, sizeof(dst_918_sub));
         }
@@ -1353,7 +1365,76 @@ static HWND obtn(const char *t, int id) {
     SendMessage(c, WM_SETFONT, (WPARAM)g_fontBtn, TRUE);
     return c;
 }
-static HWND chkb(const char *t, int id) { return mk("BUTTON", t, BS_AUTOCHECKBOX, id); }
+static WNDPROC g_oldChkProc = NULL;
+
+static LRESULT CALLBACK CheckSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    if (uMsg == WM_PAINT) {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hWnd, &ps);
+        RECT rc; GetClientRect(hWnd, &rc);
+
+        /* Fill background with Card color */
+        HBRUSH brCard = CreateSolidBrush(COL_CARD);
+        FillRect(hdc, &rc, brCard);
+        DeleteObject(brCard);
+
+        int checked = (SendMessage(hWnd, BM_GETCHECK, 0, 0) == BST_CHECKED);
+
+        /* Draw check box square (14x14) */
+        int boxY = (rc.bottom - rc.top - 14) / 2;
+        RECT boxRc = { rc.left + 1, boxY, rc.left + 15, boxY + 14 };
+
+        HBRUSH brBox = CreateSolidBrush(COL_FIELD);
+        HPEN penBox = CreatePen(PS_SOLID, 1, checked ? COL_ACCENT : COL_CARDBR);
+        HGDIOBJ oldBr = SelectObject(hdc, brBox);
+        HGDIOBJ oldPen = SelectObject(hdc, penBox);
+        RoundRect(hdc, boxRc.left, boxRc.top, boxRc.right, boxRc.bottom, 3, 3);
+
+        if (checked) {
+            /* Crisp amber checkmark */
+            HPEN penChk = CreatePen(PS_SOLID, 2, COL_ACCENT);
+            HGDIOBJ oldChkPen = SelectObject(hdc, penChk);
+            MoveToEx(hdc, boxRc.left + 3, boxRc.top + 7, NULL);
+            LineTo(hdc, boxRc.left + 6, boxRc.top + 10);
+            LineTo(hdc, boxRc.left + 11, boxRc.top + 3);
+            SelectObject(hdc, oldChkPen);
+            DeleteObject(penChk);
+        }
+
+        SelectObject(hdc, oldBr);
+        SelectObject(hdc, oldPen);
+        DeleteObject(brBox);
+        DeleteObject(penBox);
+
+        /* Draw text in crisp white COL_TXT */
+        char txt[128] = "";
+        GetWindowText(hWnd, txt, sizeof(txt));
+        if (txt[0]) {
+            RECT txtRc = rc;
+            txtRc.left += 20;
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, COL_TXT);
+            HFONT f = (HFONT)SendMessage(hWnd, WM_GETFONT, 0, 0);
+            HGDIOBJ oldF = SelectObject(hdc, f ? f : g_fontMini);
+            DrawText(hdc, txt, -1, &txtRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            SelectObject(hdc, oldF);
+        }
+
+        EndPaint(hWnd, &ps);
+        return 0;
+    }
+    return CallWindowProc(g_oldChkProc, hWnd, uMsg, wParam, lParam);
+}
+
+static HWND chkb(const char *t, int id) {
+    HWND c = mk("BUTTON", t, BS_AUTOCHECKBOX, id);
+    SendMessage(c, WM_SETFONT, (WPARAM)g_fontMini, TRUE);
+    if (!g_oldChkProc) {
+        g_oldChkProc = (WNDPROC)GetWindowLongPtr(c, GWLP_WNDPROC);
+    }
+    SetWindowLongPtr(c, GWLP_WNDPROC, (LONG_PTR)CheckSubclassProc);
+    return c;
+}
 static void mv(HWND c, int x, int y, int w, int h) {
     if (c) SetWindowPos(c, NULL, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS);
 }
