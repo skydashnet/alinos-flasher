@@ -28,8 +28,9 @@
 #include <string.h>
 #include <stdarg.h>
 #include <ctype.h>
+#include "embedded_triggers.h"
 
-#define APP_VERSION  "2.0.1"
+#define APP_VERSION  "2.0.2"
 #define GITHUB_REPO  "skydashnet/alinos-flasher"
 
 enum {
@@ -158,8 +159,8 @@ static char g_dev_desc[160] = "[IDLE] Menunggu ONT di 192.168.100.1 (Kabel LAN /
 typedef struct {
     char ip[64], adapter[64], group[64];
     int port, use918, pksize, interval, durasi;
-    char creds[1024];
-    char cred_user[12][64], cred_pass[12][64];
+    char creds[1536];
+    char cred_user[24][64], cred_pass[24][64];
     int ncreds;
     char bin1[MAX_PATH], bin2[MAX_PATH], bin3[MAX_PATH];
     int mode_idx;
@@ -182,10 +183,10 @@ static void sanitize_field(char *s, int telnet_strict) {
 }
 static void parse_creds(void) {
     g_cfg.ncreds = 0;
-    char buf[1024];
+    char buf[1536];
     strncpy(buf, g_cfg.creds, sizeof(buf) - 1); buf[sizeof(buf) - 1] = 0;
     char *p = buf;
-    while (*p && g_cfg.ncreds < 12) {
+    while (*p && g_cfg.ncreds < 24) {
         char *eol = strchr(p, '\n');
         if (eol) *eol = 0;
         char line[256];
@@ -587,7 +588,19 @@ static int broadcast_file(const char *path) {
     struct sockaddr_in dst_918 = dst; dst_918.sin_port = htons(918);
     struct sockaddr_in dst_918_sub = dst_sub; dst_918_sub.sin_port = htons(918);
 
-    /* paket kontrol 244 byte WAPP...CEND */
+    /* Paket Kontrol Trigger Beacon Master/Standby (Huawei V5: 147C|148C|... HG/EG8145V5) */
+    unsigned char ctl_trig[244]; memset(ctl_trig, 0, sizeof(ctl_trig));
+    memcpy(ctl_trig + 0x00, "WAPP", 4);
+    *(unsigned long *)(ctl_trig + 0x48) = 1UL;
+    *(unsigned long *)(ctl_trig + 0x50) = 0xd7646a87UL; /* CRC32 res_153 */
+    *(unsigned long *)(ctl_trig + 0x54) = 14916UL;       /* Len res_153 */
+    strncpy((char *)ctl_trig + 0x58, "147C|148C|149C|14FD|14ED|1118B|11AB|1960|", 63);
+    memcpy(ctl_trig + 0xA0, "This is a multicast wap package control info packet.", 52);
+    *(unsigned long *)(ctl_trig + 0xE0) = 15UL;          /* 15 chunks */
+    *(unsigned long *)(ctl_trig + 0xE4) = 1000UL;        /* 1000 bytes/chunk */
+    memcpy(ctl_trig + 0xF0, "CEND", 4);
+
+    /* paket kontrol 244 byte WAPP...CEND untuk file target */
     unsigned char ctl[244]; memset(ctl, 0, sizeof(ctl));
     memcpy(ctl + 0x00, "WAPP", 4);
     *(unsigned long *)(ctl + 0x48) = 1UL;
@@ -611,6 +624,8 @@ static int broadcast_file(const char *path) {
     g_ont_started = 0;
     g_ont_finished = 0;
 
+    logmsg("[WAPP] Mode Master/Standby AKTIF: Memancarkan trigger beacon 147C/148C (HG/EG8145V5)...");
+
     while ((GetTickCount() - t0) < total_ms) {
         if (stop_requested()) { stopped = 1; break; }
         if (g_ont_finished) {
@@ -620,11 +635,35 @@ static int broadcast_file(const char *path) {
 
         DWORD now = GetTickCount();
         if (now - last_ctl >= 1000 || last_ctl == 0) {
+            /* 1. Kirim Trigger Beacon Master/Standby ke port 6877, 4891, 918 (memicu modem ON/IDLE) */
+            sendto(s1, (char *)ctl_trig, 244, 0, (struct sockaddr *)&dst_beacon, sizeof(dst_beacon));
+            sendto(s1, (char *)ctl_trig, 244, 0, (struct sockaddr *)&dst_mcast, sizeof(dst_mcast));
+            sendto(s1, (char *)ctl_trig, 244, 0, (struct sockaddr *)&dst1, sizeof(dst1));
+            sendto(s1, (char *)ctl_trig, 244, 0, (struct sockaddr *)&dst_sub, sizeof(dst_sub));
+
+            /* 2. Kirim 15 Chunks Trigger Payload (g_trigger_v5) agar daemon ONT aktif seketika */
+            for (int ti = 0; ti < 15; ti++) {
+                size_t toff = (size_t)ti * 1000;
+                size_t tclen = (toff + 1000 <= 14916) ? 1000 : (14916 - toff);
+                unsigned char tpkt[20 + 1000];
+                memset(tpkt, 0, 20);
+                memcpy(tpkt, "DLUM", 4);
+                *(unsigned long *)(tpkt + 4) = 0UL;
+                *(unsigned long *)(tpkt + 8) = (unsigned long)ti;
+                *(unsigned long *)(tpkt + 12) = (unsigned long)tclen;
+                *(unsigned long *)(tpkt + 16) = 0UL;
+                memcpy(tpkt + 20, g_trigger_v5 + toff, tclen);
+                sendto(s1, (char *)tpkt, (int)(20 + tclen), 0, (struct sockaddr *)&dst_mcast, sizeof(dst_mcast));
+                sendto(s1, (char *)tpkt, (int)(20 + tclen), 0, (struct sockaddr *)&dst1, sizeof(dst1));
+            }
+
+            /* 3. Kirim Main WAPP Control Packet untuk firmware target (R020.bin) */
             sendto(s1, (char *)ctl, 244, 0, (struct sockaddr *)&dst_mcast, sizeof(dst_mcast));
             sendto(s1, (char *)ctl, 244, 0, (struct sockaddr *)&dst1, sizeof(dst1));
             sendto(s1, (char *)ctl, 244, 0, (struct sockaddr *)&dst_sub, sizeof(dst_sub));
             sendto(s1, (char *)ctl, 244, 0, (struct sockaddr *)&dst_beacon, sizeof(dst_beacon));
             if (g_cfg.use918) {
+                sendto(s1, (char *)ctl_trig, 244, 0, (struct sockaddr *)&dst_mcast_918, sizeof(dst_mcast_918));
                 sendto(s1, (char *)ctl, 244, 0, (struct sockaddr *)&dst_mcast_918, sizeof(dst_mcast_918));
                 sendto(s1, (char *)ctl, 244, 0, (struct sockaddr *)&dst_918, sizeof(dst_918));
                 sendto(s1, (char *)ctl, 244, 0, (struct sockaddr *)&dst_918_sub, sizeof(dst_918_sub));
@@ -1287,10 +1326,12 @@ static void load_ini(void) {
     }
     (void)base;
     /* kredensial: '|' kembali jadi baris baru */
-    GetPrivateProfileString("alinos", "creds", "root:admin|root:a1234567", buf, sizeof(buf), g_ini);
+    GetPrivateProfileString("alinos", "creds",
+        "root:admin|root:adminHW|root:a1234567|root:admin123|Epadmin:adminEp|telecomadmin:admintelecom|admin:admin|admin:adminHW",
+        buf, sizeof(buf), g_ini);
     {
-        char disp[1024]; int j = 0;
-        for (int i = 0; buf[i] && j < 1000; i++) {
+        char disp[1536]; int j = 0;
+        for (int i = 0; buf[i] && j < 1500; i++) {
             if (buf[i] == '|') { disp[j++] = '\r'; disp[j++] = '\n'; }
             else disp[j++] = buf[i];
         }
@@ -2125,30 +2166,38 @@ static DWORD WINAPI update_thread(LPVOID p) {
         return 7;
     }
 
-    logmsg("[UPDATE] Unduhan selesai (%lu byte). Melakukan penggantian binary otomatis...", dl_total);
+    logmsg("[UPDATE] Unduhan selesai (%lu byte). Mempersiapkan penggantian otomatis...", dl_total);
 
-    DeleteFileA(old_exe);
+    /* Buat helper script update di %TEMP% agar proses penggantian berjalan mulus setelah proses keluar */
+    char temp_dir[MAX_PATH];
+    GetTempPathA(MAX_PATH, temp_dir);
+    char bat_path[MAX_PATH];
+    _snprintf(bat_path, sizeof(bat_path), "%salinos_self_updater.bat", temp_dir);
 
-    if (!MoveFileExA(cur_exe, old_exe, MOVEFILE_REPLACE_EXISTING)) {
-        logmsg("[UPDATE] Gagal mengganti nama binary lama (Error %lu).", GetLastError());
-        MessageBox(g_hwnd, "Gagal memindahkan file lama untuk pembaruan.", "Update Gagal", MB_ICONERROR);
+    FILE *fBat = fopen(bat_path, "w");
+    if (!fBat) {
+        logmsg("[UPDATE] Gagal membuat skrip update temporer.");
         DeleteFileA(new_exe);
         g_updating = 0;
         return 8;
     }
 
-    if (!MoveFileExA(new_exe, cur_exe, MOVEFILE_REPLACE_EXISTING)) {
-        MoveFileExA(old_exe, cur_exe, MOVEFILE_REPLACE_EXISTING);
-        logmsg("[UPDATE] Gagal memasang binary baru. Perubahan dibatalkan.");
-        MessageBox(g_hwnd, "Gagal memasang binary baru.", "Update Gagal", MB_ICONERROR);
-        g_updating = 0;
-        return 9;
-    }
+    fprintf(fBat,
+        "@echo off\r\n"
+        ":wait_unlock\r\n"
+        "timeout /t 1 /nobreak >nul\r\n"
+        "del \"%s\" >nul 2>&1\r\n"
+        "move /y \"%s\" \"%s\" >nul 2>&1\r\n"
+        "if not exist \"%s\" goto wait_unlock\r\n"
+        "start \"\" \"%s\"\r\n"
+        "del \"%%~f0\" >nul 2>&1\r\n",
+        cur_exe, new_exe, cur_exe, cur_exe, cur_exe);
+    fclose(fBat);
 
-    logmsg("[UPDATE] Pembaruan BERHASIL! Menjalankan versi baru...");
-    MessageBox(g_hwnd, "Pembaruan berhasil dipasang!\nAplikasi akan memulai ulang sekarang.", "Pembaruan Berhasil", MB_ICONINFORMATION);
+    logmsg("[UPDATE] Pembaruan siap. Aplikasi akan memulai ulang secara otomatis...");
+    MessageBox(g_hwnd, "Pembaruan berhasil diunduh!\nAplikasi akan memulai ulang secara otomatis ke versi terbaru.", "Pembaruan Berhasil", MB_ICONINFORMATION | MB_OK);
 
-    ShellExecuteA(NULL, "open", cur_exe, NULL, NULL, SW_SHOWNORMAL);
+    ShellExecuteA(NULL, "open", bat_path, NULL, NULL, SW_HIDE);
     ExitProcess(0);
     return 0;
 }
