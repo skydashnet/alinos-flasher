@@ -1,0 +1,27 @@
+# Compiled binaries and build artifacts
+build/
+*.exe
+*.dll
+*.res
+*.o
+*.obj
+
+# Release archives
+*.zip
+*.tar.gz
+*.7z
+
+# Firmware binaries (distributed via releases/storage)
+firmware/
+Docs/
+*.bin
+
+# Local signing certificates and keys
+certs/
+*.pem
+*.key
+
+# Editor and agent cache
+.opencode*
+*.tmp
+*.log
