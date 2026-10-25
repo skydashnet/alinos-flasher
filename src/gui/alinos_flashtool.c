@@ -30,7 +30,7 @@
 #include <ctype.h>
 #include "embedded_triggers.h"
 
-#define APP_VERSION  "2.0.2"
+#define APP_VERSION  "2.0.3"
 #define GITHUB_REPO  "skydashnet/alinos-flasher"
 
 enum {
@@ -907,27 +907,25 @@ static const struct { int mode; unsigned long id; const char *nama; } MODES[7] =
 };
 static int step2(void) {
     Tn t;
-    logmsg("[STEP2] Sesi A: EquipMode.sh on");
+    logmsg("[STEP2] Menghubungkan Telnet & Login Otomatis...");
     if (tn_login_auto(&t) != 0) return -1;
-    prog_local(20);
+    prog_local(25);
     tn_cmd(&t, "shell", 1500);
-    tn_cmd(&t, "EquipMode.sh on", 2500);
-    tn_cmd(&t, "exit", 800);
-    tn_cmd(&t, "quit", 800);
-    tn_close(&t);
     prog_local(45);
-    if (stop_requested()) return 1;
-    logmsg("[STEP2] Sesi B: restorehwmode + reboot");
-    if (tn_login_auto(&t) != 0) return -1;
-    prog_local(65);
-    tn_cmd(&t, "shell", 1500);
-    tn_cmd(&t, "sudo restorehwmode.sh", 4000);
-    tn_cmd(&t, "restorehwmode.sh", 4000);
-    prog_local(85);
+    logmsg("[STEP2] Mengaktifkan Factory EquipMode...");
+    tn_cmd(&t, "EquipMode.sh on", 2500);
+    prog_local(70);
+    logmsg("[STEP2] Merestore Konfigurasi Pabrik (COMMON Mode)...");
+    tn_cmd(&t, "sudo restorehwmode.sh", 3000);
+    tn_cmd(&t, "restorehwmode.sh", 3000);
+    prog_local(90);
+    logmsg("[STEP2] Mengirim perintah reboot...");
     tn_cmd(&t, "reboot", 1000);
+    tn_cmd(&t, "exit", 500);
+    tn_cmd(&t, "reset", 1000);
     tn_close(&t);
     prog_local(100);
-    logmsg("[STEP2] Selesai - modem reboot.");
+    logmsg("[STEP2] SUKSES! Modem sedang reboot dan reset total ke default pabrik.");
     return 0;
 }
 static int step4(void) {
@@ -1327,7 +1325,7 @@ static void load_ini(void) {
     (void)base;
     /* kredensial: '|' kembali jadi baris baru */
     GetPrivateProfileString("alinos", "creds",
-        "root:admin|root:adminHW|root:a1234567|root:admin123|Epadmin:adminEp|telecomadmin:admintelecom|admin:admin|admin:adminHW",
+        "root:adminHW|root:admin|root:a1234567|root:admin123|Epadmin:adminEp|telecomadmin:admintelecom|admin:admin|admin:adminHW",
         buf, sizeof(buf), g_ini);
     {
         char disp[1536]; int j = 0;
